@@ -78,6 +78,12 @@ class ICPConfig(BaseModel):
     # Each variant runs in every city alongside the industry itself, so the
     # estimate grows with it. Empty → each industry is its own one search.
     keyword_variants: dict[str, list[str]] = {}
+    # Leave out businesses too big to be the buyer you want: a listing with
+    # more reviews than this (0 = no limit), or whose name contains one of
+    # these words (chains and franchises, e.g. "Smart Fit"). Applied during
+    # discovery, before a business becomes a row.
+    max_review_count: int = 0
+    exclude_names: list[str] = []
 
 
 class WarmupConfig(BaseModel):

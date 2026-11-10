@@ -1726,6 +1726,8 @@ class DiscoveryReport:
     # forbidden. Folding them together would hide a do-not-contact list that
     # has grown too broad inside a number nobody questions.
     excluded: int = 0
+    # Over icp.max_review_count or named like a chain in icp.exclude_names.
+    too_big: int = 0
     new_companies: int = 0
     known_companies: int = 0
     observations: int = 0
@@ -1742,6 +1744,7 @@ class DiscoveryReport:
             "actual_cost": round(self.actual_cost, 4),
             "found": self.found, "junk": self.junk,
             "excluded": self.excluded,
+            "too_big": self.too_big,
             "new_companies": self.new_companies,
             "known_companies": self.known_companies,
             "observations": self.observations,
@@ -2026,6 +2029,9 @@ async def run_discovery(
                     if do_not_contact_domain_match(biz.domain, do_not_contact):
                         report.excluded += 1
                         continue
+                    if too_big(biz, config):
+                        report.too_big += 1
+                        continue
                     ident = biz.identity()
                     if not ident:
                         continue
@@ -2102,6 +2108,17 @@ async def run_discovery(
                                records=report.new_companies,
                                cost_usd=report.actual_cost, error=str(e))
     return report
+
+
+def too_big(biz: Business, config) -> bool:
+    """Over the ICP's review ceiling, or named like an excluded chain."""
+    icp = getattr(config, "icp", None)
+    ceiling = int(getattr(icp, "max_review_count", 0) or 0)
+    if ceiling and biz.review_count is not None and biz.review_count > ceiling:
+        return True
+    words = [w.strip().lower() for w in (getattr(icp, "exclude_names", None) or []) if w.strip()]
+    name = (biz.name or "").lower()
+    return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", name) for w in words)
 
 
 async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, bool]:

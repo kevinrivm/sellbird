@@ -695,6 +695,8 @@ def cmd_discover(args):
         # stop reading the block, and this is the line worth noticing.
         if r.get("excluded"):
             print(f"    {r['excluded']} skipped — on your do-not-contact list")
+        if r.get("too_big"):
+            print(f"    {r['too_big']} skipped — over icp.max_review_count or named in icp.exclude_names")
         print(f"    {r.get('observations', 0)} observations recorded")
         print(f"    actual cost: ${r.get('actual_cost', 0):.4f}")
         if r.get("stopped"):

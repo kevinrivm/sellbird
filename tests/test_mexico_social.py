@@ -551,3 +551,43 @@ async def test_a_search_that_answers_nothing_is_retried_later(state, config):
     found = await S.find_social_pages(state, config, search=blocked)
     assert found["searched"] == 0 and found["unanswered"] == 1
     assert len(await state.companies_needing_social_search()) == 1
+
+
+# ── Leaving out businesses too big to be the buyer ──
+
+
+def test_too_big_by_reviews_or_chain_name():
+    cfg = load_config(str(PROJECT_ROOT / "sellbird.yaml"))
+    cfg.icp.max_review_count = 400
+    cfg.icp.exclude_names = ["Smart Fit", "OXXO"]
+    big = D.Business(name="Clínica Ejemplo", review_count=401)
+    chain = D.Business(name="Gimnasio Smart Fit - Centro", review_count=30)
+    small = D.Business(name="Gimnasio Ejemplo", review_count=120)
+    unknown = D.Business(name="Gimnasio Smartfitness", review_count=None)
+    assert D.too_big(big, cfg) and D.too_big(chain, cfg)
+    assert not D.too_big(small, cfg) and not D.too_big(unknown, cfg)
+    cfg.icp.max_review_count = 0
+    assert not D.too_big(big, cfg)
+
+
+@pytest.mark.asyncio
+async def test_discovery_skips_chains_before_they_become_rows(state, monkeypatch):
+    cfg = load_config(str(PROJECT_ROOT / "sellbird.yaml"))
+    cfg.icp.exclude_names = ["Smart Fit"]
+
+    class Fake(D.DiscoveryProvider):
+        key, label = "fake_chain", "Fake"
+
+        def configured(self, env):
+            return True
+
+        async def fetch(self, client, env, query):
+            p = D.ApifyMaps()
+            return [p.to_business(maps_item(title="Smart Fit Centro", placeId="c1"), query),
+                    p.to_business(maps_item(title="Gimnasio Ejemplo", placeId="c2",
+                                            website="https://www.facebook.com/gymejemplo"), query)]
+
+    monkeypatch.setitem(D.PROVIDERS, "fake_chain", Fake())
+    report = await D.run_discovery(state, cfg, "fake_chain", [D.DiscoveryQuery(term="gimnasio")])
+    assert report.too_big == 1 and report.new_companies == 1
+    assert await state.get_company_by_external_id("gmaps:c1") is None
