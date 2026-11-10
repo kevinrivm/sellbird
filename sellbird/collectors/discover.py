@@ -368,6 +368,10 @@ class Business:
     source_url: str = ""
     provider: str = ""
     raw_title: str = ""             # SERP evidence for junk filtering before normalization
+    # The business's own public social pages, when the listing gives them.
+    # Many local businesses use one of these as their only "website".
+    facebook_url: str = ""
+    instagram_url: str = ""
 
     def identity(self) -> str:
         return self.domain or self.external_id
@@ -1455,6 +1459,202 @@ class ScavioSearch(ScavioProvider):
         return out
 
 
+def social_kind(url: str) -> str:
+    """"facebook", "instagram" or "" for a link to a public social page."""
+    host = (urlparse(url if "://" in (url or "") else f"https://{url or ''}")
+            .hostname or "").lower()
+    host = host.removeprefix("www.").removeprefix("m.").removeprefix("web.")
+    if host in ("facebook.com", "fb.com", "fb.me") or host.endswith(".facebook.com"):
+        return "facebook"
+    if host in ("instagram.com", "instagr.am"):
+        return "instagram"
+    return ""
+
+
+# Paths that are Facebook or Instagram itself, never a business's page.
+_NOT_A_PAGE = re.compile(
+    r"^/(?:sharer|share|dialog|plugins|login|tr|events|groups/?$|hashtag|explore|"
+    r"p/|reel/|reels/|stories/|watch|photo|story\.php|permalink\.php)", re.I)
+
+
+def social_page_url(url: str) -> str:
+    """A clean https link to the page itself, or "" when it isn't one.
+
+    Tracking parameters and fragments are dropped; profile.php keeps its id,
+    which is the page.
+    """
+    kind = social_kind(url)
+    if not kind:
+        return ""
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    if path in ("", "/") or _NOT_A_PAGE.match(path):
+        return ""
+    host = "www.facebook.com" if kind == "facebook" else "www.instagram.com"
+    if kind == "facebook" and path.rstrip("/").endswith("/profile.php"):
+        m = re.search(r"(?:^|&)id=(\d+)", parsed.query or "")
+        return f"https://{host}/profile.php?id={m.group(1)}" if m else ""
+    return f"https://{host}{path.rstrip('/')}"
+
+
+class ApifyMaps(DiscoveryProvider):
+    """Google Maps listings through Apify's most used Google Maps actor.
+
+    Every place Maps shows for a search in a city, with phone, website,
+    category, rating, review count and whether the listing is claimed. When
+    the "website" a listing gives is a Facebook or Instagram page, the
+    business is kept as having no website and the page is recorded, since
+    for many local businesses that page is their whole web presence. With
+    contact details on, the actor also reads the business's own site for
+    the social pages it links to.
+    """
+
+    key = "apify_maps"
+    label = "Apify Google Maps"
+    kind = "listings"
+    blurb = ("Google Maps results for a search in each city: phone, website, "
+             "category, rating, reviews, claimed status, and the business's "
+             "Facebook and Instagram pages. Keeps businesses with no website.")
+    cost_note = "$0.006 per business ($0.004 a place + $0.002 for contact details)"
+    free_tier = "$5 of platform credit a month on Apify's free plan"
+    signup_url = "https://console.apify.com/settings/integrations"
+    env_keys = ("apify_token",)
+    caveat = ("Runs the compass/crawler-google-places actor; a run can take a "
+              "minute or two. Prices are Apify's free-plan rates, so paid "
+              "plans spend less than estimated.")
+
+    ACTOR = "compass~crawler-google-places"
+    API = "https://api.apify.com/v2"
+    START_COST = 0.00005
+    PLACE_COST = 0.004
+    CONTACT_COST = 0.002
+    RUN_TIMEOUT = httpx.Timeout(connect=10.0, read=330.0, write=10.0, pool=10.0)
+
+    def __init__(self, contact_details: bool = True):
+        self.contact_details = contact_details
+
+    def _per_place(self) -> float:
+        return self.PLACE_COST + (self.CONTACT_COST if self.contact_details else 0.0)
+
+    def _places(self, query: DiscoveryQuery) -> int:
+        return max(1, min(int(query.limit or 1), 500))
+
+    def estimate(self, queries):
+        return sum(self.START_COST + self._per_place() * self._places(q) for q in queries)
+
+    def run_input(self, query: DiscoveryQuery) -> dict:
+        body = {
+            "searchStringsArray": [query.term],
+            "maxCrawledPlacesPerSearch": self._places(query),
+            "language": "es",
+            "scrapeContacts": self.contact_details,
+            "scrapePlaceDetailPage": False,
+            "maxReviews": 0,
+            "maxImages": 0,
+        }
+        if query.location:
+            body["locationQuery"] = query.location
+        return body
+
+    async def fetch(self, client, env, query):
+        places = self._places(query)
+        budget = self.remaining_budget
+        if math.isfinite(budget):
+            # Never ask for more places than the remaining budget pays for.
+            affordable = int(max(0.0, budget - self.START_COST) // self._per_place())
+            if affordable < 1:
+                raise ProviderExhausted("Apify: budget reached before the next search")
+            places = min(places, affordable)
+        body = dict(self.run_input(query), maxCrawledPlacesPerSearch=places)
+        params = {"maxItems": places}
+        if math.isfinite(budget):
+            params["maxTotalChargeUsd"] = f"{budget:.4f}"
+        try:
+            r = await client.post(
+                f"{self.API}/acts/{self.ACTOR}/run-sync-get-dataset-items",
+                params=params, json=body, timeout=self.RUN_TIMEOUT,
+                headers={"Authorization": f"Bearer {env['apify_token']}",
+                         "Content-Type": "application/json"},
+            )
+        except httpx.HTTPError:
+            raise RuntimeError("Apify: request failed; try again later") from None
+        # Never log response bodies: an upstream error may echo the token.
+        if r.status_code in (401, 402, 403, 429):
+            reasons = {401: "invalid API token", 402: "out of credit",
+                       403: "access refused", 429: "rate limit reached"}
+            raise ProviderExhausted(f"Apify {r.status_code}: {reasons[r.status_code]}")
+        if r.status_code == 408:
+            raise RuntimeError("Apify: the run took longer than 5 minutes; lower --limit")
+        if r.status_code >= 400:
+            raise RuntimeError(f"Apify {r.status_code}: request failed")
+        try:
+            items = r.json()
+        except ValueError:
+            raise RuntimeError("Apify: invalid JSON response") from None
+        if not isinstance(items, list):
+            raise RuntimeError("Apify: invalid response")
+        items = [i for i in items if isinstance(i, dict)][:places]
+        self.last_cost = self.START_COST + self._per_place() * len(items)
+        return [b for b in (self.to_business(i, query) for i in items) if b is not None]
+
+    def to_business(self, item: dict, query: DiscoveryQuery) -> "Business | None":
+        def text(key) -> str:
+            value = item.get(key)
+            return value.strip() if isinstance(value, str) else ""
+
+        def number(key):
+            value = item.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            return value if math.isfinite(value) and value >= 0 else None
+
+        def links(key) -> list[str]:
+            value = item.get(key)
+            if isinstance(value, str):
+                value = [value]
+            return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+        name = text("title")
+        if not name or item.get("permanentlyClosed") is True:
+            return None
+        site = text("website")
+        facebook = instagram = ""
+        if social_kind(site):
+            # The listing's "website" is their social page: that's a business
+            # with no website, which is exactly who we want to keep.
+            if social_kind(site) == "facebook":
+                facebook = social_page_url(site)
+            else:
+                instagram = social_page_url(site)
+            site = ""
+        for url in links("facebooks"):
+            facebook = facebook or social_page_url(url)
+        for url in links("instagrams"):
+            instagram = instagram or social_page_url(url)
+
+        place_id = text("placeId")
+        city = ", ".join(x for x in (text("city"), text("state")) if x)
+        claim = item.get("claimThisBusiness")
+        return Business(
+            name=name,
+            domain=normalize_domain(site),
+            website=site,
+            phone=text("phone") or text("phoneUnformatted"),
+            address=text("address"),
+            location=city or query.location,
+            category=text("categoryName"),
+            rating=number("totalScore"),
+            review_count=int(number("reviewsCount")) if number("reviewsCount") is not None else None,
+            is_claimed=(not claim) if isinstance(claim, bool) else None,
+            has_website=bool(site),
+            external_id=f"gmaps:{place_id}" if place_id else "",
+            source_url=text("url") or site,
+            provider=self.key,
+            facebook_url=facebook,
+            instagram_url=instagram,
+        )
+
+
 PROVIDERS: dict[str, DiscoveryProvider] = {
     p.key: p for p in (
         OpenStreetMap(),
@@ -1465,6 +1665,7 @@ PROVIDERS: dict[str, DiscoveryProvider] = {
         Serper(),
         ScavioMaps(),
         ScavioSearch(),
+        ApifyMaps(),
     )
 }
 
@@ -1973,6 +2174,12 @@ def _observations(biz: Business, company_id: str, confirmed: set[str],
         add("REVIEW_RATING", num=float(biz.rating))
     if biz.review_count is not None:
         add("REVIEW_COUNT", num=float(biz.review_count))
+    # The page link rides in value_text: the social profiler reads it from
+    # here, so these are what make a business without a website reachable.
+    if biz.facebook_url:
+        add("HAS_FACEBOOK_PAGE", num=1.0, text=biz.facebook_url)
+    if biz.instagram_url:
+        add("HAS_INSTAGRAM", num=1.0, text=biz.instagram_url)
     if query is not None and query.preset == "yc":
         # The search matched "backed by Y Combinator" on a page of their own
         # site (third-party sites are filtered out above). Short of reading

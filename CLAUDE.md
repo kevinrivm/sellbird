@@ -226,6 +226,9 @@ side by side: what each source does, what it costs, its free tier, and which
 | **DataForSEO SERP** | $0.006 a search at depth 30 (Live, $0.002 per 10 results) | $1 credit + free sandbox | Rank as the buying signal. Positions 11-30 are the sweet spot. Also records who holds the local 3-pack (`IN_LOCAL_PACK`). |
 | **DataForSEO Google Maps** | $0.002 a search (up to 100 results) | $1 credit + free sandbox | Map rank (`MAPS_RANK`), rating, category, claimed status; keeps businesses with no website. |
 | **Serper** | ~$0.30-$1.00/1k | 2,500 free, no card | The easiest paid one to try. |
+| **Apify Google Maps** (`apify_maps`) | ~$6/1k businesses (place + contact details) | $5/mo platform credit | Markets where many businesses have no website: keeps them, and records their Facebook / Instagram page (`HAS_FACEBOOK_PAGE`, `HAS_INSTAGRAM`). |
+
+**No website, only a social page?** `sellbird social --estimate`, then `sellbird social`, reads those businesses' public Facebook pages and Instagram profiles through Apify (no login, ~$0.012 a Facebook page, ~$0.0026 an Instagram profile). Only an email the business publishes there is used, never a guess; it is verified like any other and becomes a company-inbox prospect whose source is that page (`EMAIL_FROM_SOCIAL`). Nothing is read until the user confirms `EMAIL_FROM_SOCIAL`. Set `whatsapp.number` (and `emoji`, `message`, `label`) in sellbird.local.yaml to end every cold email with a wa.me link with a pre-typed message; Sellbird itself never sends WhatsApp, Instagram or Messenger messages.
 
 Cities are geocoded automatically (cached forever, one lookup per city), or set
 `icp.geo_coordinates` in sellbird.yaml to control the radius:

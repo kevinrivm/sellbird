@@ -2040,6 +2040,35 @@ class StateManager:
             ) as cursor:
                 return [dict(r) for r in await cursor.fetchall()]
 
+    async def companies_needing_social(self, limit: int = 50) -> list[dict]:
+        """Businesses with no website whose public social pages haven't been
+        read yet: the NO_WEBSITE cohort the website profile can't reach.
+
+        Each row carries the latest HAS_FACEBOOK_PAGE / HAS_INSTAGRAM link.
+        A business already read (any ``social`` observation) or that already
+        has a prospect is left out, so a page is paid for once.
+        """
+        latest = ("(SELECT o.value_text FROM observations o WHERE o.company_id = c.id "
+                  "AND o.signal_code = ? AND o.value_text != '' "
+                  "ORDER BY o.observed_at DESC LIMIT 1)")
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"""SELECT * FROM (
+                       SELECT c.id, c.name, c.industry, c.location, c.phone,
+                              {latest} AS facebook_url, {latest} AS instagram_url
+                       FROM companies c
+                       WHERE c.domain = ''
+                         AND NOT EXISTS (SELECT 1 FROM observations o
+                                         WHERE o.company_id = c.id AND o.collector = 'social')
+                         AND NOT EXISTS (SELECT 1 FROM prospects p WHERE p.company_id = c.id)
+                       ORDER BY c.created_at)
+                   WHERE facebook_url IS NOT NULL OR instagram_url IS NOT NULL
+                   LIMIT ?""",
+                ("HAS_FACEBOOK_PAGE", "HAS_INSTAGRAM", int(limit)),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
     async def count_companies_needing_profile(self, stale_days: int = 90) -> int:
         async with self._connect() as db:
             async with db.execute(

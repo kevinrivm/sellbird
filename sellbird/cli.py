@@ -725,6 +725,46 @@ def cmd_discover(args):
     asyncio.run(_discover())
 
 
+def cmd_social(args):
+    """Read the public Facebook/Instagram pages of businesses with no website."""
+    from sellbird.state import StateManager
+    from sellbird.config import load_config
+    from sellbird.collectors.social import run_social_profiling
+
+    async def _social():
+        config = load_config()
+        state = StateManager()
+        await state.init_db()
+        estimate = await run_social_profiling(state, config, max_spend=args.max_spend,
+                                              limit=args.limit, dry_run=True)
+        print(f"\n  {estimate.companies} businesses with no website and a social page")
+        print(f"    up to {estimate.facebook_pages} Facebook page(s) and "
+              f"{estimate.instagram_profiles} Instagram profile(s) to read (public pages only)")
+        print(f"\n  Estimated cost: up to ${estimate.estimated_cost:.4f}"
+              f"   (cap: ${args.max_spend:.2f})")
+        if args.estimate or not estimate.companies:
+            print("\n  Estimate only. Re-run without --estimate to read them.\n"
+                  if estimate.companies else "\n  Nothing to read.\n")
+            return
+        print("\n  Reading...\n")
+        report = await run_social_profiling(state, config, max_spend=args.max_spend,
+                                            limit=args.limit)
+        print(f"  SOCIAL — {report.emails_found} published email(s) found")
+        print(f"    {report.prospects_added} added as prospects"
+              + (f" ({', '.join(f'{n} {s}' for s, n in sorted(report.by_status.items()))})"
+                 if report.by_status else ""))
+        print(f"    actual cost: ${report.actual_cost:.4f}")
+        if report.stopped:
+            print(f"    stopped: {report.stopped}")
+        for err in report.errors[:5]:
+            print(f"    ! {err}")
+        print()
+        if report.stopped:
+            raise SystemExit(1)
+
+    asyncio.run(_social())
+
+
 def cmd_signals(args):
     """Review the signal vocabulary — Sellbird proposes, you confirm.
 
@@ -1237,6 +1277,16 @@ def main():
     sub.add_argument("--no-profile", action="store_true",
                      help="Don't profile what was found (profiling is free)")
     sub.set_defaults(func=cmd_discover)
+
+    sub = subparsers.add_parser(
+        "social", help="Read public Facebook/Instagram pages of businesses with no website (Apify)")
+    sub.add_argument("--estimate", action="store_true",
+                     help="Print projected spend and exit without calling anything")
+    sub.add_argument("--limit", type=int, default=25,
+                     help="Max businesses to read (default: 25)")
+    sub.add_argument("--max-spend", type=float, default=0.50,
+                     help="Hard cap in dollars (default: 0.50)")
+    sub.set_defaults(func=cmd_social)
 
     sub = subparsers.add_parser(
         "profile", help="Read discovered companies' websites (free, no Claude)")

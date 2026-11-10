@@ -554,10 +554,64 @@ def compliance_of(config) -> ComplianceConfig:
 
 
 def compliance_footer_lines(config) -> list[str]:
-    """The lines added under every cold email: address, then opt-out line."""
+    """The lines added under every cold email: address, opt-out line, then the
+    WhatsApp line when one is configured (whatsapp.number)."""
     compliance = compliance_of(config)
     return [line for line in (compliance.postal_address.strip(),
-                              compliance.opt_out_line.strip()) if line]
+                              compliance.opt_out_line.strip(),
+                              whatsapp_cta_line(config)) if line]
+
+
+class WhatsAppConfig(BaseModel):
+    """A WhatsApp link under every cold email, for markets where people
+    would rather message than reply to an email.
+
+    The link opens a chat with ``number`` and a message already typed, which
+    starts with ``emoji`` so whoever answers WhatsApp can tell which campaign
+    the person came from. Sellbird never sends WhatsApp messages itself.
+    """
+
+    number: str = ""      # country code + number; spaces, dashes and + are dropped
+    emoji: str = ""       # starts the pre-typed message, e.g. "⚡"
+    message: str = ""     # the pre-typed message after the emoji
+    label: str = ""       # the text before the link
+
+    @field_validator("number", mode="before")
+    @classmethod
+    def _digits(cls, v) -> str:
+        digits = re.sub(r"\D", "", str(v or ""))
+        if digits and not 8 <= len(digits) <= 15:
+            raise ValueError(
+                "whatsapp.number must be the full number with its country code "
+                "(8 to 15 digits), e.g. \"52 33 1234 5678\".")
+        return digits
+
+    @field_validator("emoji", "message", "label", mode="before")
+    @classmethod
+    def _text(cls, v) -> str:
+        v = "" if v is None else str(v).strip()
+        if "\n" in v or "\r" in v:
+            raise ValueError("must fit on one line")
+        return v
+
+
+def whatsapp_link(config) -> str:
+    """https://wa.me/<number>?text=<emoji + message>, or "" when no number."""
+    from urllib.parse import quote
+    wa = getattr(config, "whatsapp", None)
+    if not isinstance(wa, WhatsAppConfig) or not wa.number:
+        return ""
+    text = " ".join(part for part in (wa.emoji, wa.message) if part)
+    return f"https://wa.me/{wa.number}" + (f"?text={quote(text, safe='')}" if text else "")
+
+
+def whatsapp_cta_line(config) -> str:
+    """The footer line carrying the WhatsApp link, or ""."""
+    link = whatsapp_link(config)
+    if not link:
+        return ""
+    label = getattr(getattr(config, "whatsapp", None), "label", "") or ""
+    return f"{label} {link}".strip()
 
 
 def compliance_notice(config) -> str:
@@ -750,6 +804,7 @@ class SellbirdConfig(BaseModel):
     brain: BrainConfig = BrainConfig()
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
+    whatsapp: WhatsAppConfig = WhatsAppConfig()
     # The file it was loaded from, so a running Sellbird can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
@@ -767,6 +822,8 @@ class EnvConfig(BaseModel):
     serper_api_key: str = ""
     scavio_api_key: str = ""
     tinyfish_api_key: str = ""
+    # Apify: Google Maps discovery and public Facebook/Instagram page reads
+    apify_token: str = ""
     reoon_api_key: str = ""
     zerobounce_api_key: str = ""
     # Native mail providers (channels.email.provider: gmail | smtp)
@@ -913,6 +970,7 @@ def load_env() -> EnvConfig:
         serper_api_key=os.getenv("SERPER_API_KEY", "").strip(),
         scavio_api_key=os.getenv("SCAVIO_API_KEY", "").strip(),
         tinyfish_api_key=os.getenv("TINYFISH_API_KEY", "").strip(),
+        apify_token=os.getenv("APIFY_TOKEN", "").strip(),
         reoon_api_key=os.getenv("REOON_API_KEY", "").strip(),
         zerobounce_api_key=os.getenv("ZEROBOUNCE_API_KEY", "").strip(),
         gmail_client_id=os.getenv("GMAIL_CLIENT_ID", "").strip(),

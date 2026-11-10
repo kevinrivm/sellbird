@@ -134,6 +134,36 @@ SIGNAL_CATALOG: list[dict] = [
         "confidence_floor": 0.0,
     },
 
+    {
+        "code": "HAS_FACEBOOK_PAGE",
+        "label": "Has a Facebook page",
+        "description": (
+            "The business's own Facebook page, from its Maps listing or its "
+            "website (the link is stored with it). For many local businesses "
+            "it is their only web presence, and the social profiler can read "
+            "the contact email they publish there."
+        ),
+        "category": "discovery",
+        "value_type": "text",
+        "collector": "discover",
+        "cost_note": "included in the Google Maps lookup",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "HAS_INSTAGRAM",
+        "label": "Has an Instagram profile",
+        "description": (
+            "The business's own Instagram profile, from its Maps listing or "
+            "its website (the link is stored with it). Businesses that sell "
+            "through Instagram usually answer customers by direct message."
+        ),
+        "category": "discovery",
+        "value_type": "text",
+        "collector": "discover",
+        "cost_note": "included in the Google Maps lookup",
+        "confidence_floor": 0.0,
+    },
+
     # ── Profile: what they are (free — HTML Sellbird already fetches) ──
     {
         "code": "INCUMBENT_AGENCY",
@@ -298,6 +328,22 @@ SIGNAL_CATALOG: list[dict] = [
         "confidence_floor": 0.0,
     },
 
+    {
+        "code": "SOCIAL_LAST_POST",
+        "label": "Days since their last social post",
+        "description": (
+            "How many days ago the business last posted on its public "
+            "Instagram profile (the post date is stored with it). A recent "
+            "post means someone is actively working their social channels; "
+            "months of silence means they stopped."
+        ),
+        "category": "profile",
+        "value_type": "num",
+        "collector": "social",
+        "cost_note": "~$0.0026 per Instagram profile read (Apify)",
+        "confidence_floor": 0.0,
+    },
+
     # ── People: who decides ──
     {
         "code": "CONTACT_FOUND",
@@ -368,6 +414,21 @@ SIGNAL_CATALOG: list[dict] = [
         "value_type": "text",
         "collector": "verify",
         "cost_note": "1 verification credit (free tiers available)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "EMAIL_FROM_SOCIAL",
+        "label": "Email published on their social page",
+        "description": (
+            "The contact email a business with no website publishes on its "
+            "own public Facebook page or Instagram profile (the page is "
+            "stored with it). Read without logging in, never guessed, and "
+            "verified like any other address before anything is sent."
+        ),
+        "category": "verification",
+        "value_type": "text",
+        "collector": "social",
+        "cost_note": "~$0.012 per Facebook page or $0.0026 per Instagram profile read (Apify)",
         "confidence_floor": 0.0,
     },
     {
