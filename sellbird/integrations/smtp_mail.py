@@ -159,7 +159,11 @@ class SmtpImapProvider(MailProvider):
                 return []
             ids = data[0].split()[-limit:]
             for msg_id in ids:
-                status, parts = conn.fetch(msg_id, "(RFC822)")
+                # PEEK: reading a message must not mark it read. The mailbox
+                # is often a person's working inbox too, and RFC822 would
+                # flip every unread email in it to read on each heartbeat.
+                # Replies are de-duplicated by the Handler, not by the flag.
+                status, parts = conn.fetch(msg_id, "(BODY.PEEK[])")
                 if status != "OK" or not parts or not isinstance(parts[0], tuple):
                     continue
                 parsed = self._parse_rfc822(parts[0][1])
