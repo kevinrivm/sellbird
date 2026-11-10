@@ -162,7 +162,8 @@ async def test_fetch_sends_the_token_in_a_header_and_caps_the_charge():
     assert "token" not in seen["query"]
     # $0.05 buys 8 places at $0.006: never ask for more than the budget pays for.
     assert seen["query"]["maxItems"] == ["8"]
-    assert float(seen["query"]["maxTotalChargeUsd"][0]) == pytest.approx(0.05)
+    # Apify's own per-run minimum; maxItems is what keeps it to the budget.
+    assert float(seen["query"]["maxTotalChargeUsd"][0]) == pytest.approx(p.MIN_RUN_CHARGE)
     assert seen["body"]["maxCrawledPlacesPerSearch"] == 8
     assert seen["body"]["locationQuery"] == "Guadalajara"
     assert seen["body"]["language"] == "es"

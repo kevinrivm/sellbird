@@ -1528,6 +1528,7 @@ class ApifyMaps(DiscoveryProvider):
     START_COST = 0.00005
     PLACE_COST = 0.004
     CONTACT_COST = 0.002
+    MIN_RUN_CHARGE = 0.50
     RUN_TIMEOUT = httpx.Timeout(connect=10.0, read=330.0, write=10.0, pool=10.0)
 
     def __init__(self, contact_details: bool = True):
@@ -1568,7 +1569,10 @@ class ApifyMaps(DiscoveryProvider):
         body = dict(self.run_input(query), maxCrawledPlacesPerSearch=places)
         params = {"maxItems": places}
         if math.isfinite(budget):
-            params["maxTotalChargeUsd"] = f"{budget:.4f}"
+            # Apify refuses a per-run cap under the actor's minimum ($0.50
+            # here). maxItems and the place count above are what bound the
+            # spend to the budget; this is a second ceiling, not the first.
+            params["maxTotalChargeUsd"] = f"{max(budget, self.MIN_RUN_CHARGE):.4f}"
         try:
             r = await client.post(
                 f"{self.API}/acts/{self.ACTOR}/run-sync-get-dataset-items",

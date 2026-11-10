@@ -37,6 +37,7 @@ INSTAGRAM_ACTOR = "apify~instagram-profile-scraper"
 START_COST = 0.00005
 FACEBOOK_PAGE_COST = 0.012
 INSTAGRAM_PROFILE_COST = 0.0026
+MIN_RUN_CHARGE = 0.50
 RUN_TIMEOUT = httpx.Timeout(connect=10.0, read=330.0, write=10.0, pool=10.0)
 
 # What a page names when it shows an address it doesn't own: a template,
@@ -175,7 +176,9 @@ async def run_actor(client: httpx.AsyncClient, token: str, actor: str, body: dic
     """
     params = {"maxItems": max(1, int(max_items))}
     if math.isfinite(max_charge):
-        params["maxTotalChargeUsd"] = f"{max(0.0, max_charge):.4f}"
+        # Apify refuses a per-run cap under an actor's minimum; maxItems (one
+        # per page asked for) is what bounds the spend to the estimate.
+        params["maxTotalChargeUsd"] = f"{max(max_charge, MIN_RUN_CHARGE):.4f}"
     try:
         r = await client.post(f"{API}/acts/{actor}/run-sync-get-dataset-items",
                               params=params, json=body, timeout=RUN_TIMEOUT,
