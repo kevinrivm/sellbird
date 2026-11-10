@@ -729,12 +729,21 @@ def cmd_social(args):
     """Read the public Facebook/Instagram pages of businesses with no website."""
     from sellbird.state import StateManager
     from sellbird.config import load_config
-    from sellbird.collectors.social import run_social_profiling
+    from sellbird.collectors.social import find_social_pages, run_social_profiling
 
     async def _social():
         config = load_config()
         state = StateManager()
         await state.init_db()
+        if not args.no_find:
+            print("\n  Looking up the social pages of businesses with no website and none "
+                  "on their listing (free web search, slow on purpose)...")
+            found = await find_social_pages(state, config, limit=args.limit)
+            print(f"    {found['searched']} looked up: {found['facebook']} Facebook page(s), "
+                  f"{found['instagram']} Instagram profile(s) found")
+            if found.get("unanswered"):
+                print(f"    {found['unanswered']} left for later: the search engines returned "
+                      "nothing (rate-limited?). A free TINYFISH_API_KEY makes this reliable.")
         estimate = await run_social_profiling(state, config, max_spend=args.max_spend,
                                               limit=args.limit, dry_run=True)
         print(f"\n  {estimate.companies} businesses with no website and a social page")
@@ -1286,6 +1295,8 @@ def main():
                      help="Max businesses to read (default: 25)")
     sub.add_argument("--max-spend", type=float, default=0.50,
                      help="Hard cap in dollars (default: 0.50)")
+    sub.add_argument("--no-find", action="store_true",
+                     help="Skip looking up pages by web search for businesses whose listing has none")
     sub.set_defaults(func=cmd_social)
 
     sub = subparsers.add_parser(

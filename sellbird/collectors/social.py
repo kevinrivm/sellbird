@@ -24,6 +24,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import httpx
 
@@ -122,6 +123,132 @@ def _page_key(url: str) -> str:
     """The same page however a link spells it."""
     page = social_page_url(url or "")
     return page.lower().rstrip("/") if page else ""
+
+
+# Words that say what a business is, not which one it is: a page that only
+# shares these with the name ("Gym", "Fitness Center") could be anyone's.
+_GENERIC_NAME_WORDS = frozenset("""
+    gym gimnasio gimnasios fitness center centro club studio estudio sport sports
+    deportivo deportiva the el la los las de del y and en sucursal branch box crossfit
+    clinica clínica dental consultorio spa salon salón estetica estética restaurante
+    cafe café bar tienda shop store taller escuela academia instituto grupo company
+    sa cv rl mx com oficial official
+""".split())
+
+
+def _fold(text: str) -> str:
+    import unicodedata
+    text = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in text if not unicodedata.combining(c)).lower()
+
+
+def name_tokens(name: str) -> list[str]:
+    """The distinctive words of a business name, accent- and case-folded."""
+    words = re.findall(r"[a-z0-9]+", _fold(name))
+    return [w for w in words if len(w) >= 3 and w not in _GENERIC_NAME_WORDS
+            and not w.isdigit()]
+
+
+def page_matches_business(url: str, snippet: str, name: str, city: str = "") -> bool:
+    """Is this search hit the business's own page?
+
+    A distinctive word of its name must be in the page address (where a
+    page names itself) or, with its city, in the result text. A page that
+    only shares generic words ("gym", "fitness") is never taken: a wrong
+    page would mean writing to the wrong business.
+    """
+    tokens = name_tokens(name)
+    if not tokens:
+        return False
+    slug = re.sub(r"[^a-z0-9]", "", _fold(urlparse(url).path))
+    text = _fold(snippet)
+    city_word = (name_tokens(city.split(",")[0]) or [""])[0] if city else ""
+    city_seen = bool(city_word) and (city_word in text or city_word in slug)
+    in_slug = [t for t in tokens if len(t) >= 4 and t in slug]
+    # Two distinctive words in the address are specific enough on their own.
+    # One ("Community Gym") is shared by businesses in every city, so it
+    # also needs the city in the address or the result text.
+    if len(set(in_slug)) >= 2 or (len(tokens) == 1 and in_slug and city_seen):
+        return True
+    hits = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", text))
+    return hits >= min(2, len(tokens)) and (not city_word or city_word in text)
+
+
+async def find_social_pages(state, config, limit: int = 50, env=None, search=None) -> dict:
+    """Look up the Facebook/Instagram page of businesses that have no website
+    and no page on their listing, with Sellbird's free web search.
+
+    Free (no paid API), slow on purpose (polite search delays), and strict
+    about matching: see page_matches_business. Found pages are recorded as
+    HAS_FACEBOOK_PAGE / HAS_INSTAGRAM with collector ``social_search`` and a
+    lower confidence than a link the listing itself gave.
+    """
+    from sellbird.config import load_env
+    from sellbird.signals import seed_signal_catalog
+
+    await seed_signal_catalog(state)
+    confirmed = await state.confirmed_signal_codes()
+    wanted = {"HAS_FACEBOOK_PAGE", "HAS_INSTAGRAM"} & confirmed
+    result = {"searched": 0, "facebook": 0, "instagram": 0}
+    if not wanted:
+        return result
+    companies = await state.companies_needing_social_search(limit=limit)
+    if not companies:
+        return result
+    if search is None:
+        from sellbird.agents.scout import Scout
+        scout = Scout(None, state, config, env or load_env())
+
+        async def search(query: str):
+            scout._queries_this_cycle = 0   # our own budget: `limit` businesses
+            return await scout._web_search(query)
+
+    for company in companies:
+        name, city = company.get("name") or "", company.get("location") or ""
+        if not name_tokens(name):
+            await state.add_observations([_searched(company["id"])])
+            continue
+        result["searched"] += 1
+        place = city.split(",")[0].strip()
+        found: dict[str, str] = {}
+        answered = False
+        for query in (f'"{name}" {place} facebook', f'"{name}" {place} instagram'):
+            try:
+                hits = await search(query)
+            except Exception as e:
+                logger.debug(f"social search failed for {name}: {e}")
+                hits = []
+            answered = answered or bool(hits)
+            for url, snippet in hits or []:
+                page = social_page_url(url)
+                kind = social_kind(page)
+                if page and kind not in found and page_matches_business(url, snippet, name, city):
+                    found[kind] = page
+            if "facebook" in found:
+                break   # Facebook is the one that carries contact emails
+        if not answered:
+            # No results at all is a blocked or rate-limited search, not "no
+            # page": leave the business to be looked up on a later run.
+            result["searched"] -= 1
+            result["unanswered"] = result.get("unanswered", 0) + 1
+            continue
+        rows = [_searched(company["id"])]
+        for kind, code in (("facebook", "HAS_FACEBOOK_PAGE"), ("instagram", "HAS_INSTAGRAM")):
+            if kind in found and code in wanted:
+                rows.append({"company_id": company["id"], "signal_code": code,
+                             "collector": "social_search", "value_num": 1.0,
+                             "value_text": found[kind], "confidence": 0.7,
+                             "evidence_url": found[kind]})
+                result[kind] += 1
+        await state.add_observations(rows)
+    return result
+
+
+def _searched(company_id: str) -> dict:
+    """The marker that a business's pages were looked for (found or not)."""
+    return {"company_id": company_id, "signal_code": "HAS_FACEBOOK_PAGE",
+            "collector": "social_search", "value_num": 0.0, "value_text": "",
+            "confidence": 1.0, "evidence_url": ""}
 
 
 @dataclass

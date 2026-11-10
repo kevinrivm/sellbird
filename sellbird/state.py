@@ -2069,6 +2069,24 @@ class StateManager:
             ) as cursor:
                 return [dict(r) for r in await cursor.fetchall()]
 
+    async def companies_needing_social_search(self, limit: int = 50) -> list[dict]:
+        """Businesses with no website and no known social page that nobody
+        has looked up yet (no ``social_search`` observation)."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT c.id, c.name, c.location FROM companies c
+                   WHERE c.domain = ''
+                     AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.company_id = c.id
+                                     AND o.signal_code IN ('HAS_FACEBOOK_PAGE', 'HAS_INSTAGRAM')
+                                     AND (o.value_text != '' OR o.collector = 'social_search'))
+                     AND NOT EXISTS (SELECT 1 FROM prospects p WHERE p.company_id = c.id)
+                   ORDER BY c.created_at
+                   LIMIT ?""",
+                (int(limit),),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
     async def count_companies_needing_profile(self, stale_days: int = 90) -> int:
         async with self._connect() as db:
             async with db.execute(

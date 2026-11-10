@@ -470,3 +470,84 @@ def test_the_spanish_opt_out_line_is_accepted():
 def test_replying_baja_is_an_opt_out(reply):
     from sellbird.agents.handler import _opt_out_reason
     assert _opt_out_reason(reply, reply) is not None
+
+
+# ── Finding the page of a business whose listing has none ──
+
+
+@pytest.mark.parametrize("url, snippet, ok", [
+    ("https://www.facebook.com/GimnasioAtlasPrime", "", True),
+    ("https://www.facebook.com/atlas.prime.gdl/", "", True),
+    ("https://www.facebook.com/gymfitnessgdl", "Gym fitness en Guadalajara", False),
+    ("https://www.facebook.com/otrogym", "Atlas Prime gimnasio, Guadalajara, Jalisco", True),
+    ("https://www.facebook.com/otrogym", "Atlas Prime gimnasio en Zapopan", False),
+])
+def test_only_a_page_that_names_the_business_is_taken(url, snippet, ok):
+    assert S.page_matches_business(url, snippet, "Gimnasio Atlas Prime",
+                                   "Guadalajara, Jalisco") is ok
+
+
+def test_generic_names_are_never_matched():
+    assert S.name_tokens("Fitness Gym Center") == []
+    assert not S.page_matches_business("https://www.facebook.com/fitnessgym", "", "Fitness Gym")
+
+
+@pytest.mark.asyncio
+async def test_find_records_the_page_and_is_done_once(state, config):
+    cid = await state.add_company(Company(name="Gimnasio Atlas Prime", domain="",
+                                          location="Guadalajara, Jalisco",
+                                          external_id="gmaps:atlas"))
+    queries = []
+
+    async def fake_search(query):
+        queries.append(query)
+        return [("https://www.facebook.com/sharer/sharer.php?u=x", ""),
+                ("https://www.facebook.com/gimnasioatlasprime/", "")]
+
+    found = await S.find_social_pages(state, config, search=fake_search)
+    assert found == {"searched": 1, "facebook": 1, "instagram": 0}
+    assert queries == ['"Gimnasio Atlas Prime" Guadalajara facebook']
+    rows = await state.companies_needing_social()
+    assert [r["facebook_url"] for r in rows] == ["https://www.facebook.com/gimnasioatlasprime"]
+    obs = await state.get_observations(company_id=cid, signal_code="HAS_FACEBOOK_PAGE")
+    assert any(o["confidence"] == 0.7 and o["collector"] == "social_search" for o in obs)
+    # Looked up once: the next run doesn't search again.
+    assert await state.companies_needing_social_search() == []
+
+
+@pytest.mark.asyncio
+async def test_find_with_nothing_found_marks_it_searched(state, config):
+    await state.add_company(Company(name="Gimnasio Atlas Prime", domain="",
+                                    location="Guadalajara", external_id="gmaps:atlas2"))
+
+    async def fake_search(query):
+        return [("https://www.facebook.com/otronegocio", "Otro negocio")]
+
+    found = await S.find_social_pages(state, config, search=fake_search)
+    assert found["searched"] == 1 and found["facebook"] == 0
+    assert await state.companies_needing_social_search() == []
+    assert await state.companies_needing_social() == []
+
+
+def test_one_common_word_needs_the_city():
+    assert not S.page_matches_business("https://www.facebook.com/thecommunitygym", "",
+                                       "Community Gym", "Guadalajara, Jalisco")
+    assert S.page_matches_business("https://www.facebook.com/communitygymgdl",
+                                   "Community Gym · Guadalajara, Jalisco", "Community Gym",
+                                   "Guadalajara, Jalisco")
+    # Only one of two distinctive words in the address: someone else's page.
+    assert not S.page_matches_business("https://www.facebook.com/musclegym", "",
+                                       "Muscle Hiit Gym", "Guadalajara")
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_answers_nothing_is_retried_later(state, config):
+    await state.add_company(Company(name="Gimnasio Atlas Prime", domain="",
+                                    location="Guadalajara", external_id="gmaps:atlas3"))
+
+    async def blocked(query):
+        return []
+
+    found = await S.find_social_pages(state, config, search=blocked)
+    assert found["searched"] == 0 and found["unanswered"] == 1
+    assert len(await state.companies_needing_social_search()) == 1
