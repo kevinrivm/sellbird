@@ -697,6 +697,9 @@ def cmd_discover(args):
             print(f"    {r['excluded']} skipped — on your do-not-contact list")
         if r.get("too_big"):
             print(f"    {r['too_big']} skipped — over icp.max_review_count or named in icp.exclude_names")
+        if r.get("prospects_added"):
+            print(f"    {r['prospects_added']} published email(s) stored unverified — "
+                  "grade them with `sellbird verify`")
         print(f"    {r.get('observations', 0)} observations recorded")
         print(f"    actual cost: ${r.get('actual_cost', 0):.4f}")
         if r.get("stopped"):
@@ -774,6 +777,51 @@ def cmd_social(args):
             raise SystemExit(1)
 
     asyncio.run(_social())
+
+
+def cmd_verify(args):
+    """Grade published inboxes still marked "guess", oldest first."""
+    from sellbird.state import StateManager
+    from sellbird.config import load_config, load_env, live_do_not_contact
+    from sellbird.gate import do_not_contact_match
+    from sellbird.integrations.email_finder import verify_published_address
+
+    async def _verify():
+        config = load_config()
+        state = StateManager()
+        await state.init_db()
+        rows = await state.unverified_inboxes(limit=args.limit, industry=args.industry)
+        print(f"\n  {len(rows)} published email(s) waiting for verification"
+              + (f" (industry contains {args.industry!r})" if args.industry else ""))
+        if args.estimate or not rows:
+            print()
+            return
+        env = load_env()
+        blocked = live_do_not_contact(config)
+        counts: dict[str, int] = {}
+        inconclusive = 0
+        for row in rows:
+            if do_not_contact_match(row["email"], blocked):
+                continue
+            try:
+                status = await verify_published_address(row["email"], env=env)
+            except Exception:
+                status = "guess"
+            counts[status] = counts.get(status, 0) + 1
+            if status == "guess":
+                # Several inconclusive in a row: the verifiers' quota is spent.
+                inconclusive += 1
+                if inconclusive >= 5:
+                    print("    stopped: 5 inconclusive checks in a row "
+                          "(verifier credits used up?)")
+                    break
+                continue
+            inconclusive = 0
+            await state.update_prospect_email(row["id"], row["email"], status)
+        print("    " + (", ".join(f"{n} {s}" for s, n in sorted(counts.items())) or "nothing checked"))
+        print("    Only verified (and, with send_to_risky, risky) addresses are ever sent.\n")
+
+    asyncio.run(_verify())
 
 
 def cmd_signals(args):
@@ -1300,6 +1348,16 @@ def main():
     sub.add_argument("--no-find", action="store_true",
                      help="Skip looking up pages by web search for businesses whose listing has none")
     sub.set_defaults(func=cmd_social)
+
+    sub = subparsers.add_parser(
+        "verify", help="Verify published emails still marked 'guess' (directory, social pages)")
+    sub.add_argument("--limit", type=int, default=100,
+                     help="Max addresses to check (default: 100)")
+    sub.add_argument("--industry", default="",
+                     help="Only prospects whose industry contains this text")
+    sub.add_argument("--estimate", action="store_true",
+                     help="Count what's waiting and exit without checking anything")
+    sub.set_defaults(func=cmd_verify)
 
     sub = subparsers.add_parser(
         "profile", help="Read discovered companies' websites (free, no Claude)")

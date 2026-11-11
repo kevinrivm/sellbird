@@ -2040,6 +2040,25 @@ class StateManager:
             ) as cursor:
                 return [dict(r) for r in await cursor.fetchall()]
 
+    async def unverified_inboxes(self, limit: int = 100, industry: str = "") -> list[dict]:
+        """Published inboxes (directory, social page) still graded "guess".
+
+        Only new prospects whose address the business itself published: a
+        pattern-built guess is the Scout's to resolve, not this queue's.
+        ``industry`` narrows by a case-insensitive substring of the industry.
+        """
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT id, email, company, industry FROM prospects
+                   WHERE source = 'company_inbox' AND email_status = 'guess'
+                     AND status = 'new' AND email != ''
+                     AND (? = '' OR LOWER(industry) LIKE '%' || LOWER(?) || '%')
+                   ORDER BY created_at LIMIT ?""",
+                (industry, industry, int(limit)),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
     async def companies_needing_social(self, limit: int = 50) -> list[dict]:
         """Businesses with no website whose public social pages haven't been
         read yet: the NO_WEBSITE cohort the website profile can't reach.

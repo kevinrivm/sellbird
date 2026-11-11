@@ -417,6 +417,7 @@ function loadCurrentTab() {
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
+    case 'funnel': loadSegmentFunnel(); break;
     case 'outbox': loadOutbox(); break;
     case 'conversations': loadConversations(); break;
     case 'activity': loadActivity(); break;
@@ -2462,6 +2463,41 @@ function campaignProgress(c) {
       '<span><i class="' + p[2] + '"></i>' + p[0] + ' <b>' + p[1] + '</b></span>').join('') + '</div></div>';
 }
 
+// ── Funnel by industry ──
+
+async function loadSegmentFunnel() {
+  const el = document.getElementById('funnel-table');
+  const data = await api('/api/funnel/segments');
+  if (!data) { el.innerHTML = offlineState(); return; }
+  if (data.error) { el.innerHTML = '<p class="muted">Couldn\'t read the funnel.</p>'; return; }
+  if (!data.segments.length) {
+    el.innerHTML = emptyState(icon('signals'), 'Nothing found yet', 'Run discovery and the funnel fills in.');
+    return;
+  }
+  const cols = [
+    ['found', 'Businesses'], ['emails', 'Emails'], ['verified', 'Verified'], ['risky', 'Risky'],
+    ['unverified', 'Unverified'], ['invalid', 'Invalid'], ['drafts', 'Drafts'], ['sent', 'Sent'],
+    ['bounced', 'Bounced'], ['replied', 'Replied'], ['interested', 'Interested'],
+  ];
+  const pct = (n, d) => d ? ' <span class="muted" style="font-size:11px">' + Math.round(100 * n / d) + '%</span>' : '';
+  const cell = (s, k) => {
+    const v = s[k] || 0;
+    if (k === 'emails') return v + pct(v, s.found);
+    if (k === 'verified') return v + pct(v, s.emails);
+    if (k === 'bounced') return v + pct(v, s.sent);
+    if (k === 'replied') return v + pct(v, s.sent);
+    return String(v);
+  };
+  const row = (s, strong) => '<tr' + (strong ? ' style="font-weight:600"' : '') + '><td>' + escHtml(s.segment) + '</td>' +
+    cols.map(c => '<td style="text-align:right">' + cell(s, c[0]) + '</td>').join('') + '</tr>';
+  el.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Industry</th>' +
+    cols.map(c => '<th style="text-align:right">' + c[1] + '</th>').join('') + '</tr></thead><tbody>' +
+    data.segments.map(s => row(s, false)).join('') + row(data.total, true) +
+    '</tbody></table></div>' +
+    '<p class="muted" style="font-size:12px;margin-top:8px">Emails % = of businesses found · Verified % = of emails · ' +
+    'Bounced and Replied % = of emails sent. Opens aren\'t tracked: the pixel hurts delivery and mail apps fake it.</p>';
+}
+
 async function loadCampaigns() {
   const el = document.getElementById('campaigns-list');
   const data = await api('/api/campaigns');
@@ -3126,6 +3162,7 @@ setInterval(() => {
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
+    case 'funnel': loadSegmentFunnel(); break;
     case 'conversations': loadConversations(); break;
     case 'activity': loadActivity(); break;
     case 'inboxes': loadInboxes(); break;

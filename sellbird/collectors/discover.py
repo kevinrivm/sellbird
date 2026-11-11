@@ -29,6 +29,7 @@ import re
 from html import unescape
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
+import urllib.parse
 from urllib.parse import urlparse
 
 import httpx
@@ -372,6 +373,11 @@ class Business:
     # Many local businesses use one of these as their only "website".
     facebook_url: str = ""
     instagram_url: str = ""
+    # A contact address the business itself gave a public directory
+    # (verified like any other before anything is sent), and the low end of
+    # the headcount band the directory reports, when it reports one.
+    email: str = ""
+    employees_min: int | None = None
 
     def identity(self) -> str:
         return self.domain or self.external_id
@@ -1659,6 +1665,192 @@ class ApifyMaps(DiscoveryProvider):
         )
 
 
+def _fold(text: str) -> str:
+    """Lowercase without accents, for matching Spanish place and class names."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in text if not unicodedata.combining(c)).lower().strip()
+
+
+# INEGI's two-digit state keys (Áreas Geoestadísticas Estatales).
+MX_STATES = {
+    "aguascalientes": "01", "baja california": "02", "baja california sur": "03",
+    "campeche": "04", "coahuila": "05", "coahuila de zaragoza": "05", "colima": "06",
+    "chiapas": "07", "chihuahua": "08", "ciudad de mexico": "09", "cdmx": "09",
+    "distrito federal": "09", "durango": "10", "guanajuato": "11", "guerrero": "12",
+    "hidalgo": "13", "jalisco": "14", "estado de mexico": "15", "edomex": "15",
+    "michoacan": "16", "michoacan de ocampo": "16", "morelos": "17", "nayarit": "18",
+    "nuevo leon": "19", "oaxaca": "20", "puebla": "21", "queretaro": "22",
+    "queretaro de arteaga": "22", "quintana roo": "23", "san luis potosi": "24",
+    "sinaloa": "25", "sonora": "26", "tabasco": "27", "tamaulipas": "28",
+    "tlaxcala": "29", "veracruz": "30", "veracruz de ignacio de la llave": "30",
+    "yucatan": "31", "zacatecas": "32",
+}
+_COUNTRY = {"mexico", "mx", "mex"}
+
+
+def mx_place(location: str) -> tuple[str, str]:
+    """("Guadalajara, Jalisco, México") -> ("14", "guadalajara").
+
+    The state key, and the city to keep within it ("" for the whole state).
+    A place naming no state returns ("", ""). Querétaro the city and
+    Querétaro the state share a name: "Querétaro, Querétaro" is the city.
+    """
+    parts = [_fold(p) for p in (location or "").split(",")]
+    parts = [p for p in parts if p and p not in _COUNTRY]
+    state = next((MX_STATES[p] for p in reversed(parts) if p in MX_STATES), "")
+    if not state:
+        return "", ""
+    city = parts[0] if len(parts) > 1 else ""
+    return state, city
+
+
+def _employees_min(band: str) -> int | None:
+    match = re.match(r"\s*(\d+)", band or "")
+    return int(match.group(1)) if match else None
+
+
+class Denue(DiscoveryProvider):
+    """Mexico's official business directory (INEGI DENUE), free.
+
+    Every establishment the economic census registered: activity class,
+    headcount band, address, phone, website, and the contact email the
+    business gave the census when it gave one. Searched by keyword within a
+    state, kept to the city and to the activity classes configured in
+    ``icp.denue_classes``. Addresses are stored unverified: ``sellbird
+    verify`` grades them before anything can be sent.
+    """
+
+    key = "denue"
+    label = "INEGI DENUE (Mexico)"
+    kind = "listings"
+    blurb = ("Mexico's official business directory: activity class, headcount, "
+             "address, phone, website and, for many small businesses, the email "
+             "they gave the census. Keeps businesses with no website.")
+    cost_note = "free"
+    free_tier = "free with a token from INEGI"
+    signup_url = "https://www.inegi.org.mx/servicios/api_denue.html"
+    env_keys = ("inegi_denue_token",)
+    caveat = ("Mexico only, and only places that name a state (\"León, Guanajuato\"). "
+              "Census data: some emails and phones are years old, which is why "
+              "every address is verified before it is used.")
+
+    API = "https://www.inegi.org.mx/app/api/denue/v1/consulta"
+    PAGE = 1000
+    MAX_PAGES = 30
+    FICHA = "https://www.inegi.org.mx/app/mapa/denue/default.aspx?idee={id}"
+    EMAIL = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
+
+    def __init__(self):
+        self.classes: dict[str, list[str]] = {}
+
+    def configure(self, config) -> None:
+        """Map each search phrase (industry or variant) to its allowed classes."""
+        icp = getattr(config, "icp", None)
+        wanted = getattr(icp, "denue_classes", None) or {}
+        variants = getattr(icp, "keyword_variants", None) or {}
+        self.classes = {}
+        for industry, classes in wanted.items():
+            folded = [_fold(c) for c in classes if c.strip()]
+            for phrase in (industry, *variants.get(industry, [])):
+                self.classes[_fold(phrase)] = folded
+
+    def estimate(self, queries):
+        return 0.0
+
+    def keeps(self, record: dict, term: str, city: str) -> bool:
+        allowed = self.classes.get(_fold(term))
+        if allowed and not any(c in _fold(str(record.get("Clase_actividad") or ""))
+                               for c in allowed):
+            return False
+        if city:
+            places = [_fold(p) for p in str(record.get("Ubicacion") or "").split(",")]
+            if city not in places:
+                return False
+        return True
+
+    async def fetch(self, client, env, query):
+        state, city = mx_place(query.location)
+        if not state:
+            raise RuntimeError(f"DENUE: no Mexican state in {query.location!r}")
+        word = urllib.parse.quote(_fold(query.term) or "todos")
+        token = env["inegi_denue_token"]
+        wanted = max(1, int(query.limit or 1))
+        kept: list[Business] = []
+        for page in range(self.MAX_PAGES):
+            start = page * self.PAGE + 1
+            url = (f"{self.API}/BuscarEntidad/{word}/{state}/{start}/"
+                   f"{start + self.PAGE - 1}/{token}")
+            try:
+                r = await client.get(url, timeout=httpx.Timeout(120.0, connect=15.0))
+            except httpx.HTTPError:
+                raise RuntimeError("DENUE: request failed; try again later") from None
+            # Never echo the URL or body: the token travels in the path.
+            if r.status_code in (401, 403):
+                raise ProviderExhausted(f"DENUE {r.status_code}: token refused")
+            if r.status_code >= 400:
+                raise RuntimeError(f"DENUE {r.status_code}: request failed")
+            try:
+                records = r.json() if r.content.strip() else []
+            except ValueError:
+                raise RuntimeError("DENUE: invalid response (check the token)") from None
+            if not isinstance(records, list):
+                raise RuntimeError("DENUE: invalid response (check the token)")
+            for record in records:
+                if isinstance(record, dict) and self.keeps(record, query.term, city):
+                    biz = self.to_business(record, query)
+                    if biz is not None:
+                        kept.append(biz)
+            if len(kept) >= wanted or len(records) < self.PAGE:
+                break
+        self.last_cost = 0.0
+        return kept[:wanted]
+
+    def to_business(self, record: dict, query: DiscoveryQuery) -> "Business | None":
+        def text(key) -> str:
+            value = record.get(key)
+            return re.sub(r"\s+", " ", value).strip() if isinstance(value, str) else ""
+
+        name = text("Nombre") or text("Razon_social")
+        rid = text("Id")
+        if not name or not rid:
+            return None
+        if name.isupper():
+            name = name.title()
+        site = text("Sitio_internet")
+        if site and not re.match(r"https?://", site, re.I):
+            site = "https://" + site
+        facebook = instagram = ""
+        if social_kind(site) == "facebook":
+            facebook, site = social_page_url(site), ""
+        elif social_kind(site) == "instagram":
+            instagram, site = social_page_url(site), ""
+        email = text("Correo_e").lower()
+        if not self.EMAIL.match(email):
+            email = ""
+        where = [p.strip() for p in text("Ubicacion").split(",") if p.strip()]
+        location = ", ".join(p.title() if p.isupper() else p for p in where[-2:]) or query.location
+        street = " ".join(x for x in (text("Tipo_vialidad"), text("Calle"), text("Num_Exterior")) if x)
+        address = ", ".join(x for x in (street, text("Colonia"), text("CP")) if x)
+        return Business(
+            name=name,
+            domain=normalize_domain(site) if site else "",
+            website=site,
+            phone=text("Telefono"),
+            address=address,
+            location=location,
+            category=text("Clase_actividad"),
+            has_website=bool(site),
+            external_id=f"denue:{rid}",
+            source_url=self.FICHA.format(id=rid),
+            provider=self.key,
+            facebook_url=facebook,
+            instagram_url=instagram,
+            email=email,
+            employees_min=_employees_min(text("Estrato")),
+        )
+
+
 PROVIDERS: dict[str, DiscoveryProvider] = {
     p.key: p for p in (
         OpenStreetMap(),
@@ -1670,6 +1862,7 @@ PROVIDERS: dict[str, DiscoveryProvider] = {
         ScavioMaps(),
         ScavioSearch(),
         ApifyMaps(),
+        Denue(),
     )
 }
 
@@ -1728,6 +1921,7 @@ class DiscoveryReport:
     excluded: int = 0
     # Over icp.max_review_count or named like a chain in icp.exclude_names.
     too_big: int = 0
+    prospects_added: int = 0   # directory-published inboxes, still unverified
     new_companies: int = 0
     known_companies: int = 0
     observations: int = 0
@@ -1745,6 +1939,7 @@ class DiscoveryReport:
             "found": self.found, "junk": self.junk,
             "excluded": self.excluded,
             "too_big": self.too_big,
+            "prospects_added": self.prospects_added,
             "new_companies": self.new_companies,
             "known_companies": self.known_companies,
             "observations": self.observations,
@@ -1923,6 +2118,8 @@ async def run_discovery(
         raise ValueError(f"unknown discovery provider: {provider_key!r}")
 
     queries = queries or build_queries(config)
+    if hasattr(provider, "configure"):
+        provider.configure(config)
     if provider.needs_coordinates:
         queries = await resolve_coordinates(state, queries)
     report = DiscoveryReport(provider=provider_key, queries=len(queries))
@@ -2044,6 +2241,9 @@ async def run_discovery(
                         else:
                             report.known_companies += 1
                         company_ids[ident] = company_id
+                        if biz.email and "EMAIL_FROM_DIRECTORY" in confirmed:
+                            report.prospects_added += await _add_directory_inbox(
+                                state, biz, company_id, do_not_contact)
                     company_id = company_ids[ident]
                     phrase = biz.keyword or query.keyword()
                     for code, value in zip(RANK_CODES, _rank_tuple(biz)):
@@ -2116,9 +2316,41 @@ def too_big(biz: Business, config) -> bool:
     ceiling = int(getattr(icp, "max_review_count", 0) or 0)
     if ceiling and biz.review_count is not None and biz.review_count > ceiling:
         return True
+    headcount = int(getattr(icp, "max_employees", 0) or 0)
+    if headcount and biz.employees_min is not None and biz.employees_min > headcount:
+        return True
     words = [w.strip().lower() for w in (getattr(icp, "exclude_names", None) or []) if w.strip()]
     name = (biz.name or "").lower()
     return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", name) for w in words)
+
+
+async def _add_directory_inbox(state, biz: Business, company_id: str,
+                               do_not_contact) -> int:
+    """Store the address a business gave a public directory as its inbox.
+
+    Unverified ("guess", never sent) until ``sellbird verify`` grades it:
+    a directory can hold thousands of addresses, and verifying each one
+    inside discovery would spend a verifier's whole quota on the first run.
+    """
+    from sellbird.gate import do_not_contact_match
+    from sellbird.models.prospect import COMPANY_INBOX_SOURCE, Prospect
+
+    email = (biz.email or "").strip().lower()
+    if not email or do_not_contact_match(email, do_not_contact):
+        return 0
+    if await state.get_prospect_by_email(email):
+        return 0
+    prospect = Prospect(
+        email=email, email_status="guess", email_verified=False,
+        company=biz.name, company_id=company_id, title="General inbox",
+        industry=biz.category or "", phone=biz.phone or "",
+        source=COMPANY_INBOX_SOURCE, source_url=biz.source_url,
+        personalization_notes="Contact email the business gave a public business directory.",
+    )
+    if not prospect.is_valid():
+        return 0
+    await state.add_prospect(prospect)
+    return 1
 
 
 async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, bool]:
@@ -2201,6 +2433,8 @@ def _observations(biz: Business, company_id: str, confirmed: set[str],
         add("HAS_FACEBOOK_PAGE", num=1.0, text=biz.facebook_url)
     if biz.instagram_url:
         add("HAS_INSTAGRAM", num=1.0, text=biz.instagram_url)
+    if biz.email:
+        add("EMAIL_FROM_DIRECTORY", num=1.0, text=biz.email)
     if query is not None and query.preset == "yc":
         # The search matched "backed by Y Combinator" on a page of their own
         # site (third-party sites are filtered out above). Short of reading

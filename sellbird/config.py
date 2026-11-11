@@ -84,6 +84,17 @@ class ICPConfig(BaseModel):
     # discovery, before a business becomes a row.
     max_review_count: int = 0
     exclude_names: list[str] = []
+    # Leave out businesses whose registered headcount starts above this
+    # (0 = no limit). Only directory sources that report a headcount band
+    # (the Mexican DENUE does) can apply it.
+    max_employees: int = 0
+    # DENUE only: the official activity classes that count as each industry,
+    # matched as a case- and accent-insensitive substring, e.g.
+    #   "dentista": ["consultorios dentales"]
+    # A keyword search also matches suppliers and namesakes ("veterinaria"
+    # finds wholesalers of veterinary drugs); this keeps the right ones.
+    # An industry with no entry keeps every class.
+    denue_classes: dict[str, list[str]] = {}
 
 
 class WarmupConfig(BaseModel):
@@ -559,13 +570,13 @@ def compliance_of(config) -> ComplianceConfig:
     return found if isinstance(found, ComplianceConfig) else ComplianceConfig()
 
 
-def compliance_footer_lines(config) -> list[str]:
+def compliance_footer_lines(config, industry: str = "") -> list[str]:
     """The lines added under every cold email: address, opt-out line, then the
     WhatsApp line when one is configured (whatsapp.number)."""
     compliance = compliance_of(config)
     return [line for line in (compliance.postal_address.strip(),
                               compliance.opt_out_line.strip(),
-                              whatsapp_cta_line(config)) if line]
+                              whatsapp_cta_line(config, industry)) if line]
 
 
 class WhatsAppConfig(BaseModel):
@@ -581,6 +592,35 @@ class WhatsAppConfig(BaseModel):
     emoji: str = ""       # starts the pre-typed message, e.g. "⚡"
     message: str = ""     # the pre-typed message after the emoji
     label: str = ""       # the text before the link
+    # A different emoji per industry, so each campaign is told apart where
+    # the chat lands: {"dent": "🦷", "veterinar": "🐾"}. Keys match as a
+    # case- and accent-insensitive substring of the prospect's industry, in
+    # order; no match falls back to ``emoji``.
+    emoji_by_industry: dict[str, str] = {}
+
+    @field_validator("emoji_by_industry", mode="before")
+    @classmethod
+    def _emoji_map(cls, v) -> dict:
+        out = {}
+        for key, emoji in dict(v or {}).items():
+            key, emoji = str(key or "").strip(), str(emoji or "").strip()
+            if "\n" in key + emoji or "\r" in key + emoji:
+                raise ValueError("whatsapp.emoji_by_industry entries must fit on one line")
+            if key and emoji:
+                out[key] = emoji
+        return out
+
+    def emoji_for(self, industry: str = "") -> str:
+        import unicodedata
+        def fold(s: str) -> str:
+            s = unicodedata.normalize("NFKD", s or "")
+            return "".join(c for c in s if not unicodedata.combining(c)).lower()
+        folded = fold(industry)
+        if folded:
+            for key, emoji in self.emoji_by_industry.items():
+                if fold(key) in folded:
+                    return emoji
+        return self.emoji
 
     @field_validator("number", mode="before")
     @classmethod
@@ -601,23 +641,37 @@ class WhatsAppConfig(BaseModel):
         return v
 
 
-def whatsapp_link(config) -> str:
-    """https://wa.me/<number>?text=<emoji + message>, or "" when no number."""
+def whatsapp_link(config, industry: str = "") -> str:
+    """https://wa.me/<number>?text=<emoji + message>, or "" when no number.
+
+    ``industry`` picks the emoji from ``whatsapp.emoji_by_industry``."""
     from urllib.parse import quote
     wa = getattr(config, "whatsapp", None)
     if not isinstance(wa, WhatsAppConfig) or not wa.number:
         return ""
-    text = " ".join(part for part in (wa.emoji, wa.message) if part)
+    text = " ".join(part for part in (wa.emoji_for(industry), wa.message) if part)
     return f"https://wa.me/{wa.number}" + (f"?text={quote(text, safe='')}" if text else "")
 
 
-def whatsapp_cta_line(config) -> str:
+def whatsapp_cta_line(config, industry: str = "") -> str:
     """The footer line carrying the WhatsApp link, or ""."""
-    link = whatsapp_link(config)
+    link = whatsapp_link(config, industry)
     if not link:
         return ""
     label = getattr(getattr(config, "whatsapp", None), "label", "") or ""
     return f"{label} {link}".strip()
+
+
+def all_footer_lines(config) -> list[str]:
+    """Every footer line a cold email can carry, one WhatsApp line per
+    industry emoji included: what a reply quoting our footer may contain."""
+    lines = compliance_footer_lines(config)
+    wa = getattr(config, "whatsapp", None)
+    for key in (getattr(wa, "emoji_by_industry", None) or {}):
+        line = whatsapp_cta_line(config, key)
+        if line and line not in lines:
+            lines.append(line)
+    return lines
 
 
 def compliance_notice(config) -> str:
@@ -830,6 +884,8 @@ class EnvConfig(BaseModel):
     tinyfish_api_key: str = ""
     # Apify: Google Maps discovery and public Facebook/Instagram page reads
     apify_token: str = ""
+    # INEGI DENUE: Mexico's official business directory (free token)
+    inegi_denue_token: str = ""
     reoon_api_key: str = ""
     zerobounce_api_key: str = ""
     # Native mail providers (channels.email.provider: gmail | smtp)
@@ -977,6 +1033,7 @@ def load_env() -> EnvConfig:
         scavio_api_key=os.getenv("SCAVIO_API_KEY", "").strip(),
         tinyfish_api_key=os.getenv("TINYFISH_API_KEY", "").strip(),
         apify_token=os.getenv("APIFY_TOKEN", "").strip(),
+        inegi_denue_token=os.getenv("INEGI_DENUE_TOKEN", "").strip(),
         reoon_api_key=os.getenv("REOON_API_KEY", "").strip(),
         zerobounce_api_key=os.getenv("ZEROBOUNCE_API_KEY", "").strip(),
         gmail_client_id=os.getenv("GMAIL_CLIENT_ID", "").strip(),

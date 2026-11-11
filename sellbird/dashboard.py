@@ -864,6 +864,61 @@ def _pipeline_bucket(status: str | None, stage: str | None, intent: str | None,
     return "closed_out"   # lost, opted out, bounced, unwritable
 
 
+@app.get("/api/funnel/segments")
+async def get_funnel_segments():
+    """The whole funnel per industry: found → email → verified → sent → replied.
+
+    One row per company industry, biggest first, so a campaign across many
+    trades shows which ones are worth more of the list and the sending.
+    """
+    try:
+        companies = await query_db("""
+            SELECT COALESCE(NULLIF(industry, ''), '(none)') AS segment, COUNT(*) AS found
+            FROM companies GROUP BY segment""")
+        rows = await query_db("""
+            SELECT COALESCE(NULLIF(c.industry, ''), NULLIF(p.industry, ''), '(none)') AS segment,
+                   p.status, p.email_status, l.stage, l.intent,
+                   EXISTS (SELECT 1 FROM outbox o WHERE o.prospect_id = p.id
+                           AND o.kind = 'sequence' AND o.status = 'pending_review') AS drafted,
+                   EXISTS (SELECT 1 FROM outbox o WHERE o.prospect_id = p.id
+                           AND o.kind = 'sequence' AND o.sent_at IS NOT NULL) AS sent
+            FROM prospects p
+            LEFT JOIN companies c ON c.id = p.company_id
+            LEFT JOIN (SELECT prospect_id, stage, intent, ROW_NUMBER() OVER (
+                         PARTITION BY prospect_id ORDER BY updated_at DESC, created_at DESC) AS rn
+                       FROM conversations) l ON l.prospect_id = p.id AND l.rn = 1
+            WHERE p.email != ''""")
+        keys = ("found", "emails", "verified", "risky", "unverified", "invalid",
+                "drafts", "sent", "bounced", "replied", "interested")
+        seg: dict[str, dict] = {}
+
+        def row_for(name: str) -> dict:
+            return seg.setdefault(name, {"segment": name, **dict.fromkeys(keys, 0)})
+
+        for r in companies:
+            row_for(r["segment"])["found"] = r["found"]
+        for r in rows:
+            s = row_for(r["segment"])
+            s["emails"] += 1
+            status = r["email_status"] or "guess"
+            s[{"verified": "verified", "risky": "risky", "invalid": "invalid"}.get(status, "unverified")] += 1
+            s["drafts"] += 1 if r["drafted"] else 0
+            if r["sent"]:
+                s["sent"] += 1
+                if status == "invalid":
+                    s["bounced"] += 1
+            bucket = _pipeline_bucket(r["status"], r["stage"], r["intent"], r["email_status"])
+            if bucket in ("replied", "interested", "ready_to_meet"):
+                s["replied"] += 1
+            if bucket in ("interested", "ready_to_meet"):
+                s["interested"] += 1
+        out = sorted(seg.values(), key=lambda s: (-s["emails"], -s["found"], s["segment"]))
+        total = {"segment": "Total", **{k: sum(s[k] for s in out) for k in keys}}
+        return {"segments": out, "total": total}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/stats")
 async def get_stats():
     """Pipeline overview stats."""

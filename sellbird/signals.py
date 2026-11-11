@@ -432,6 +432,21 @@ SIGNAL_CATALOG: list[dict] = [
         "confidence_floor": 0.0,
     },
     {
+        "code": "EMAIL_FROM_DIRECTORY",
+        "label": "Email given to a public business directory",
+        "description": (
+            "The contact email a business gave an official public directory "
+            "(Mexico's DENUE), stored with the directory record. Never "
+            "guessed; kept unverified until `sellbird verify` grades it, so "
+            "an old census address is never sent."
+        ),
+        "category": "verification",
+        "value_type": "text",
+        "collector": "discover",
+        "cost_note": "free (public directory; verification is what costs)",
+        "confidence_floor": 0.0,
+    },
+    {
         "code": "CONTACT_FORM_URL",
         "label": "Contact form available",
         "description": (

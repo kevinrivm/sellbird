@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from sellbird.brain import Brain
 from sellbird.config import (
     SellbirdConfig, EnvConfig, cold_daily_cap, compliance_footer_lines, compliance_notice,
+    all_footer_lines,
     compliance_of, live_do_not_contact, operator_timezone, send_window_of,
 )
 from sellbird import extensions
@@ -414,7 +415,7 @@ class Sender:
             for step in campaign.sequence
         ]
 
-        await self.state.remember_footer_lines(compliance_footer_lines(self.config))
+        await self.state.remember_footer_lines(all_footer_lines(self.config))
         result = await self.instantly.set_campaign_emails(campaign_id, sequences)
         if result is None:
             logger.error(f"Sender: Failed to set emails for campaign {campaign_id}")
@@ -736,20 +737,21 @@ class Sender:
                 details={"campaign": campaign.name, "staged": staged, "mode": mode},
             )
 
-    def _with_footer(self, body: str) -> str:
+    def _with_footer(self, body: str, industry: str = "") -> str:
         """A cold email as it leaves: the postal address and opt-out line
         underneath (CAN-SPAM). Added at send time, so a changed address
         applies to mail already queued; not added again when the body already
-        ends with it."""
-        footer = "\n".join(compliance_footer_lines(self.config))
+        ends with it. ``industry`` picks the WhatsApp emoji, when set per
+        industry."""
+        footer = "\n".join(compliance_footer_lines(self.config, industry))
         if not footer or body.rstrip().endswith(footer):
             return body
         return body.rstrip() + "\n\n" + footer
 
-    def _outgoing_body(self, item: dict) -> str:
+    def _outgoing_body(self, item: dict, prospect=None) -> str:
         """The exact body that goes out: cold email gets the footer, replies don't."""
         if item["kind"] == "sequence":
-            return self._with_footer(item["body"])
+            return self._with_footer(item["body"], getattr(prospect, "industry", "") or "")
         return item["body"]
 
     async def _follow_up_order(self, item: dict, prospect=None) -> str | tuple[str, str] | None:
@@ -830,7 +832,7 @@ class Sender:
             if colleague:
                 return "cancelled", f"{COLLEAGUE_REPLIED} ({colleague})"
         gate = pre_send_check(
-            item["to_email"], item["subject"], self._outgoing_body(item),
+            item["to_email"], item["subject"], self._outgoing_body(item, prospect),
             prospect=prospect, allow_risky=allow_risky, kind=item["kind"],
             postal_address=compliance_of(self.config).postal_address,
             do_not_contact=live_do_not_contact(self.config),
@@ -848,7 +850,7 @@ class Sender:
         if item.get("approved_by") != "you":
             # Nobody approved this one (autopilot): what a planted
             # instruction would add sends it back to you instead.
-            held = autopilot_review(item["subject"], self._outgoing_body(item), self.config,
+            held = autopilot_review(item["subject"], self._outgoing_body(item, prospect), self.config,
                                     recipient=item["to_email"])
             if held:
                 logger.warning(f"Sender: holding email to {item['to_email']} for review: {held}")
@@ -1116,7 +1118,7 @@ class Sender:
                     item["id"], status=blocked[0], error=blocked[1])
                 continue
 
-            body = self._outgoing_body(item)
+            body = self._outgoing_body(item, prospect)
             try:
                 headers = extra_headers(extensions.registry().send_headers, item)
             except SendHookError as e:
@@ -1251,7 +1253,7 @@ class Sender:
             else:
                 logger.info(f"Sender: cold email cap reached for today ({cold_cap}).")
         if sent_cold:
-            await self.state.remember_footer_lines(compliance_footer_lines(self.config))
+            await self.state.remember_footer_lines(all_footer_lines(self.config))
             notice = compliance_notice(self.config)
             if notice:
                 logger.warning(f"Sender: {notice}")
